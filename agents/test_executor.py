@@ -135,4 +135,16 @@ class TestExecutorAgent(BaseAgent):
             target_pass_rate=pass_threshold,
         )
 
-        return self.call_llm_json(EXECUTOR_ANALYSIS_SYSTEM, user_prompt)
+        return self.call_llm_json(
+            EXECUTOR_ANALYSIS_SYSTEM,
+            user_prompt,
+            default={
+                "pass_rate": pass_rate,
+                "meets_threshold": pass_rate >= pass_threshold,
+                "total_tests": surefire_result.get("total", 0),
+                "passed": surefire_result.get("passed", 0),
+                "failed": surefire_result.get("failed", 0),
+                "failed_test_details": [],
+                "summary": "Analysis skipped (LLM parse error)",
+            },
+        )

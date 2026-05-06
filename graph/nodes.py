@@ -15,7 +15,7 @@ from agents import (
     JacocoAgent,
     TestExecutorAgent,
 )
-from agents.base import get_llm
+from agents.base import get_llm, get_llm_text
 from config.settings import settings
 from graph.state import PipelineState
 from tools.java_tools import (
@@ -55,7 +55,18 @@ TOOLS: dict[str, Any] = {
 
 
 def _make_llm():
+    """JSON-mode LLM — for agents that return structured JSON responses."""
     return get_llm(
+        provider=settings.LLM_PROVIDER,
+        model=settings.LLM_MODEL,
+        temperature=settings.LLM_TEMPERATURE,
+        base_url=settings.OLLAMA_BASE_URL,
+    )
+
+
+def _make_llm_text():
+    """Text-mode LLM — for agents that generate free-form Java code."""
+    return get_llm_text(
         provider=settings.LLM_PROVIDER,
         model=settings.LLM_MODEL,
         temperature=settings.LLM_TEMPERATURE,
@@ -130,7 +141,8 @@ def input_handler_node(state: PipelineState) -> PipelineState:
 
 def junit_generator_node(state: PipelineState) -> PipelineState:
     """Generate JUnit test files for all source files."""
-    agent = JUnitGeneratorAgent(llm=_make_llm(), tools=TOOLS)
+    # Text mode: generator produces Java code, not JSON
+    agent = JUnitGeneratorAgent(llm=_make_llm_text(), tools=TOOLS)
     return agent.run(state)
 
 
@@ -150,7 +162,8 @@ def junit_validator_node(state: PipelineState) -> PipelineState:
 
 def compilation_agent_node(state: PipelineState) -> PipelineState:
     """Compile the project and auto-fix compilation errors."""
-    agent = CompilationAgent(llm=_make_llm(), tools=TOOLS)
+    # Text mode: compilation agent produces fixed Java code
+    agent = CompilationAgent(llm=_make_llm_text(), tools=TOOLS)
     return agent.run(state)
 
 

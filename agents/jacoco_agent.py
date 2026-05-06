@@ -125,4 +125,13 @@ class JacocoAgent(BaseAgent):
             uncovered_details=uncovered_details or "No detailed data available",
         )
 
-        return self.call_llm_json(JACOCO_ANALYSIS_SYSTEM, user_prompt)
+        return self.call_llm_json(
+            JACOCO_ANALYSIS_SYSTEM,
+            user_prompt,
+            default={
+                "coverage_percentage": coverage_pct,
+                "meets_threshold": coverage_pct >= coverage_threshold,
+                "uncovered_classes": low_coverage[:10],
+                "recommendations": [],
+            },
+        )

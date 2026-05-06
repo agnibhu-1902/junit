@@ -28,7 +28,14 @@ def get_llm(
     """
     if provider == "ollama":
         from langchain_ollama import ChatOllama
-        return ChatOllama(model=model, temperature=temperature, base_url=base_url)
+        # format="json" forces Ollama to always emit valid JSON — critical for
+        # local models that otherwise return prose mixed with JSON fragments.
+        return ChatOllama(
+            model=model,
+            temperature=temperature,
+            base_url=base_url,
+            format="json",
+        )
     elif provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
         return ChatAnthropic(model=model, temperature=temperature)
@@ -42,11 +49,35 @@ def get_llm(
         )
 
 
+def get_llm_text(
+    provider: str = "ollama",
+    model: str = "llama3.2",
+    temperature: float = 0.2,
+    base_url: str = "http://localhost:11434",
+) -> BaseChatModel:
+    """
+    Same as get_llm but WITHOUT format='json'.
+    Use this for agents that generate free-form text (e.g. Java code),
+    not structured JSON responses.
+    """
+    if provider == "ollama":
+        from langchain_ollama import ChatOllama
+        return ChatOllama(model=model, temperature=temperature, base_url=base_url)
+    elif provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+        return ChatAnthropic(model=model, temperature=temperature)
+    elif provider == "openai":
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(model=model, temperature=temperature)
+    else:
+        raise ValueError(f"Unknown LLM provider '{provider}'.")
+
+
 class BaseAgent:
     """Shared base for all pipeline agents."""
 
     def __init__(self, llm: BaseChatModel, tools: dict[str, Any] | None = None):
-        self.llm = llm
+        self.llm = llm          # JSON-mode LLM (for structured responses)
         self.tools = tools or {}
 
     def invoke_tool(self, tool_name: str, **kwargs) -> Any:
@@ -64,19 +95,64 @@ class BaseAgent:
         response = self.llm.invoke(messages)
         return response.content
 
-    def call_llm_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
-        """Call LLM and parse the response as JSON."""
-        raw = self.call_llm(system_prompt, user_prompt)
-        # Strip markdown code fences if present
+    def call_llm_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        default: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Call LLM and robustly parse the response as JSON.
+
+        With Ollama's format='json' the response should always be valid JSON.
+        For other providers we apply several fallback strategies.
+        If all parsing fails, returns `default` (or a safe empty dict) instead
+        of raising — so a bad LLM response never crashes the pipeline.
+        """
+        try:
+            raw = self.call_llm(system_prompt, user_prompt)
+        except Exception as e:
+            return default if default is not None else {"error": str(e)}
+
+        if not raw or not raw.strip():
+            return default if default is not None else {}
+
         raw = raw.strip()
+
+        # 1. Strip markdown code fences
         if raw.startswith("```"):
-            raw = re.sub(r"^```[a-z]*\n?", "", raw)
-            raw = re.sub(r"\n?```$", "", raw)
+            raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
+            raw = re.sub(r"\n?```\s*$", "", raw)
+            raw = raw.strip()
+
+        # 2. Direct parse
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            # Attempt to extract JSON block
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-            return {"raw_response": raw}
+            pass
+
+        # 3. Extract the first {...} block (handles prose wrapping JSON)
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            candidate = match.group()
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                # 4. Try to fix common local-model JSON mistakes:
+                #    - single quotes → double quotes
+                #    - trailing commas before } or ]
+                #    - Python-style True/False/None
+                fixed = candidate
+                fixed = re.sub(r"'([^']*)'(\s*:)", r'"\1"\2', fixed)   # 'key': → "key":
+                fixed = re.sub(r":\s*'([^']*)'", r': "\1"', fixed)      # : 'val' → : "val"
+                fixed = re.sub(r",\s*([}\]])", r"\1", fixed)             # trailing commas
+                fixed = re.sub(r"\bTrue\b", "true", fixed)
+                fixed = re.sub(r"\bFalse\b", "false", fixed)
+                fixed = re.sub(r"\bNone\b", "null", fixed)
+                try:
+                    return json.loads(fixed)
+                except json.JSONDecodeError:
+                    pass
+
+        # 5. All strategies failed — return safe default
+        return default if default is not None else {"raw_response": raw}

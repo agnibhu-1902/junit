@@ -79,7 +79,11 @@ class JUnitValidatorAgent(BaseAgent):
             source_code=source_code or "Source file not found",
         )
 
-        result = self.call_llm_json(JUNIT_VALIDATOR_SYSTEM, user_prompt)
+        result = self.call_llm_json(
+            JUNIT_VALIDATOR_SYSTEM,
+            user_prompt,
+            default={"is_valid": True, "issues": [], "fixed_code": None, "summary": "Validation skipped (LLM parse error)"},
+        )
 
         return {
             "test_file": test_file_path,

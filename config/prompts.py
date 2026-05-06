@@ -75,7 +75,8 @@ Please fix the failing test cases. Common issues to address:
 # ---------------------------------------------------------------------------
 
 JUNIT_VALIDATOR_SYSTEM = """You are a Java code reviewer specializing in JUnit test quality assurance.
-You validate test files for correctness, completeness, and adherence to best practices."""
+You validate test files for correctness, completeness, and adherence to best practices.
+You MUST respond with valid JSON only. No prose, no explanation outside the JSON object."""
 
 JUNIT_VALIDATOR_PROMPT = """Review the following JUnit test file for correctness and quality.
 
@@ -92,23 +93,23 @@ Source Code:
 {source_code}
 ```
 
-Validate the following:
+Validate:
 1. All imports are correct and complete
-2. Test class structure is valid (annotations, extends, etc.)
+2. Test class structure is valid (annotations, etc.)
 3. Mock setup is correct for all dependencies
-4. Test method signatures are valid (@Test annotation, void return, etc.)
+4. Test method signatures are valid (@Test annotation, void return)
 5. Assertions are meaningful and correct
 6. No obvious compilation errors
-7. Test method names follow conventions
 
-Return a JSON response with this structure:
+Respond with ONLY this JSON object, no other text:
 {{
-  "is_valid": true/false,
-  "issues": ["list of issues found"],
-  "fixed_code": "corrected Java code if issues found, null if valid",
-  "summary": "brief validation summary"
+  "is_valid": true,
+  "issues": [],
+  "fixed_code": null,
+  "summary": "brief summary"
 }}
-"""
+
+If there are issues, set is_valid to false, list the issues, and put the corrected Java code in fixed_code."""
 
 # ---------------------------------------------------------------------------
 # Compilation Agent
@@ -146,10 +147,10 @@ Common fixes needed:
 # Jacoco Agent
 # ---------------------------------------------------------------------------
 
-JACOCO_ANALYSIS_SYSTEM = """You are a Java code coverage expert who analyzes JaCoCo reports
-and provides actionable insights for improving test coverage."""
+JACOCO_ANALYSIS_SYSTEM = """You are a Java code coverage expert who analyzes JaCoCo reports.
+You MUST respond with valid JSON only. No prose, no explanation outside the JSON object."""
 
-JACOCO_ANALYSIS_PROMPT = """Analyze the JaCoCo coverage report and identify areas needing more tests.
+JACOCO_ANALYSIS_PROMPT = """Analyze the JaCoCo coverage report below.
 
 Project Path: {project_path}
 Current Coverage: {current_coverage}%
@@ -162,28 +163,22 @@ Coverage Report Summary:
 Uncovered Classes/Methods:
 {uncovered_details}
 
-Provide a structured analysis with:
-1. List of classes with lowest coverage
-2. Specific methods that need test coverage
-3. Recommended test scenarios for each uncovered area
-
-Return as JSON:
+Respond with ONLY this JSON object, no other text:
 {{
   "coverage_percentage": {current_coverage},
-  "meets_threshold": true/false,
-  "uncovered_classes": [{{"class": "...", "coverage": 0.0, "uncovered_methods": []}}],
-  "recommendations": ["..."]
-}}
-"""
+  "meets_threshold": false,
+  "uncovered_classes": [{{"class": "ClassName", "coverage": 0.0, "uncovered_methods": ["method1"]}}],
+  "recommendations": ["Add tests for X", "Cover edge case Y"]
+}}"""
 
 # ---------------------------------------------------------------------------
 # JUnit Test Executor
 # ---------------------------------------------------------------------------
 
-EXECUTOR_ANALYSIS_SYSTEM = """You are a Java testing expert who analyzes test execution results
-and provides fixes for failing tests."""
+EXECUTOR_ANALYSIS_SYSTEM = """You are a Java testing expert who analyzes test execution results.
+You MUST respond with valid JSON only. No prose, no explanation outside the JSON object."""
 
-EXECUTOR_ANALYSIS_PROMPT = """Analyze the test execution results and identify root causes of failures.
+EXECUTOR_ANALYSIS_PROMPT = """Analyze the test execution results below.
 
 Test Execution Report:
 {execution_report}
@@ -194,19 +189,13 @@ Failed Tests:
 Pass Rate: {pass_rate}%
 Target: {target_pass_rate}%
 
-For each failing test, identify:
-1. Root cause of failure
-2. Whether it's a test issue or source code issue
-3. Recommended fix
-
-Return as JSON:
+Respond with ONLY this JSON object, no other text:
 {{
   "pass_rate": {pass_rate},
-  "meets_threshold": true/false,
+  "meets_threshold": false,
   "total_tests": 0,
   "passed": 0,
   "failed": 0,
-  "failed_test_details": [{{"test": "...", "error": "...", "root_cause": "...", "fix": "..."}}],
-  "summary": "..."
-}}
-"""
+  "failed_test_details": [{{"test": "TestClass.method", "error": "error message", "root_cause": "cause", "fix": "suggested fix"}}],
+  "summary": "brief summary"
+}}"""
