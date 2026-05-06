@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "junit-generator-pipeline": {
+      "command": "python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "/path/to/junit-generator-pipeline",
+      "env": {
+        "LLM_PROVIDER": "openai",
+        "LLM_MODEL": "gpt-4o",
+        "OPENAI_API_KEY": "your-key-here"
+      },
+      "disabled": false,
+      "autoApprove": ["get_pipeline_status"]
+    }
+  }
+}
