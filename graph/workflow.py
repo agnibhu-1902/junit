@@ -84,17 +84,31 @@ def route_after_executor(state: PipelineState) -> str:
 
 
 def route_after_human_loop(state: PipelineState) -> str:
-    """Route after human review: approved → resume, rejected → end."""
-    if state.get("human_approved"):
-        # Resume from where we left off
-        stage = state.get("stage", "")
-        if "compilation" in stage:
-            return "jacoco_agent"
-        if "coverage" in stage:
-            return "test_executor"
-        if "tests" in stage:
-            return "done"
-    return END
+    """
+    Route after human review.
+    Uses the 'next' field set by the failing agent before the interrupt —
+    that field is preserved in the checkpoint across the human pause.
+    """
+    if not state.get("human_approved"):
+        return END
+
+    # 'next' was set by the agent that triggered the human loop
+    next_hint = state.get("next", "")
+
+    if next_hint == "human_loop":
+        # Agent wanted human loop — after approval, re-run compilation
+        # (human has fixed the files manually)
+        return "compilation_agent"
+
+    # Coverage or test failures sent us here
+    stage = state.get("stage", "")
+    if "coverage" in stage:
+        return "test_executor"
+    if "tests" in stage:
+        return "done"
+
+    # Default: re-run compilation after human fix
+    return "compilation_agent"
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +171,7 @@ def build_pipeline(checkpointer=None) -> Any:
         "human_loop",
         route_after_human_loop,
         {
+            "compilation_agent": "compilation_agent",
             "jacoco_agent": "jacoco_agent",
             "test_executor": "test_executor",
             "done": "done",

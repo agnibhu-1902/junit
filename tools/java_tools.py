@@ -105,18 +105,20 @@ def read_test_file(test_file_path: str) -> dict[str, Any]:
 def run_maven_compile(project_path: str, maven_cmd: str = "mvn") -> dict[str, Any]:
     """Run 'mvn test-compile' and return output with success/failure status."""
     result = subprocess.run(
-        [maven_cmd, "test-compile", "-q"],
+        [maven_cmd, "test-compile", "--no-transfer-progress"],
         cwd=project_path,
         capture_output=True,
         text=True,
         timeout=300,
     )
+    combined = result.stdout + result.stderr
     return {
         "success": result.returncode == 0,
         "returncode": result.returncode,
         "stdout": result.stdout,
         "stderr": result.stderr,
-        "errors": _parse_compilation_errors(result.stdout + result.stderr),
+        "raw_output": combined,
+        "errors": _parse_compilation_errors(combined),
     }
 
 

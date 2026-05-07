@@ -9,12 +9,18 @@ load_dotenv()
 
 class Settings:
     # LLM Configuration
-    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")   # ollama | openai | anthropic
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "llama3.2")        # ollama: llama3.2, codellama, etc.
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "grok")      # grok | ollama | openai | anthropic
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "grok-3-mini")
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+
+    # Grok (xAI) — https://console.x.ai
+    GROK_API_KEY: str = os.getenv("GROK_API_KEY", "")
+    GROK_BASE_URL: str = os.getenv("GROK_BASE_URL", "https://api.x.ai/v1")
+
+    # Ollama (local)
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-    # Optional cloud LLM keys (only needed if LLM_PROVIDER != ollama)
+    # Optional cloud keys
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 

@@ -12,63 +12,83 @@ from langchain_core.language_models import BaseChatModel
 
 
 def get_llm(
-    provider: str = "ollama",
-    model: str = "llama3.2",
+    provider: str = "grok",
+    model: str = "grok-3-mini",
     temperature: float = 0.2,
     base_url: str = "http://localhost:11434",
+    api_key: str = "",
 ) -> BaseChatModel:
     """
     Factory that returns the configured LLM.
 
     Supported providers:
-      - ollama     : Local Llama via Ollama (default, free, no API key needed)
+      - grok       : xAI Grok API (OpenAI-compatible, requires GROK_API_KEY)
+                     Models: grok-3-mini, grok-3, grok-2
+                     Get a key: https://console.x.ai
+      - ollama     : Local Llama via Ollama (free, no API key needed)
                      Install: https://ollama.com  then: ollama pull llama3.2
       - openai     : OpenAI API (requires OPENAI_API_KEY)
       - anthropic  : Anthropic API (requires ANTHROPIC_API_KEY)
     """
-    if provider == "ollama":
+    if provider == "grok":
+        from langchain_openai import ChatOpenAI
+        # Grok uses an OpenAI-compatible API — just point base_url at xAI
+        return ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            api_key=api_key or "dummy",          # required by SDK but validated server-side
+            base_url="https://api.x.ai/v1",
+        )
+    elif provider == "ollama":
         from langchain_ollama import ChatOllama
-        # format="json" forces Ollama to always emit valid JSON — critical for
-        # local models that otherwise return prose mixed with JSON fragments.
         return ChatOllama(
             model=model,
             temperature=temperature,
             base_url=base_url,
             format="json",
         )
-    elif provider == "anthropic":
-        from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=model, temperature=temperature)
     elif provider == "openai":
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(model=model, temperature=temperature)
+    elif provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+        return ChatAnthropic(model=model, temperature=temperature)
     else:
         raise ValueError(
             f"Unknown LLM provider '{provider}'. "
-            "Choose from: ollama, openai, anthropic"
+            "Choose from: grok, ollama, openai, anthropic"
         )
 
 
 def get_llm_text(
-    provider: str = "ollama",
-    model: str = "llama3.2",
+    provider: str = "grok",
+    model: str = "grok-3-mini",
     temperature: float = 0.2,
     base_url: str = "http://localhost:11434",
+    api_key: str = "",
 ) -> BaseChatModel:
     """
-    Same as get_llm but WITHOUT format='json'.
-    Use this for agents that generate free-form text (e.g. Java code),
-    not structured JSON responses.
+    Same as get_llm but without format='json'.
+    Use for agents that generate free-form text (Java code), not structured JSON.
     """
-    if provider == "ollama":
+    if provider == "grok":
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            api_key=api_key or "dummy",
+            base_url="https://api.x.ai/v1",
+        )
+    elif provider == "ollama":
         from langchain_ollama import ChatOllama
+        # No format="json" — free-form text output
         return ChatOllama(model=model, temperature=temperature, base_url=base_url)
-    elif provider == "anthropic":
-        from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=model, temperature=temperature)
     elif provider == "openai":
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(model=model, temperature=temperature)
+    elif provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+        return ChatAnthropic(model=model, temperature=temperature)
     else:
         raise ValueError(f"Unknown LLM provider '{provider}'.")
 

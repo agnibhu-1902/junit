@@ -20,7 +20,6 @@ Usage:
 from __future__ import annotations
 
 import json
-import sys
 from typing import Optional
 
 import typer
@@ -28,11 +27,19 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
+from rich.rule import Rule
 
 from graph import build_pipeline, PipelineState
 from config.settings import settings
 
 console = Console()
+
+# Stages that mean the graph interrupted for human review
+_HUMAN_LOOP_STAGES = {
+    "compilation_failed",
+    "coverage_failed_max_iterations",
+    "tests_failed_max_iterations",
+}
 
 
 def main(
@@ -73,7 +80,7 @@ def main(
         mcp_server.run(transport="stdio")
         return
 
-    # ── Pipeline mode ──────────────────────────────────────────────────────
+    # ── Validate input ─────────────────────────────────────────────────────
     if not project_path and not bitbucket_url:
         console.print("[red]Error:[/red] Provide --project-path or --bitbucket-url")
         raise typer.Exit(1)
@@ -94,9 +101,10 @@ def main(
     console.print(
         Panel.fit(
             f"[bold cyan]JUnit Generator Pipeline[/bold cyan]\n"
-            f"Source: [yellow]{bitbucket_url or project_path}[/yellow]\n"
-            f"Coverage threshold: [green]{coverage_threshold}%[/green]  "
-            f"Pass rate threshold: [green]{pass_threshold}%[/green]",
+            f"Source:   [yellow]{bitbucket_url or project_path}[/yellow]\n"
+            f"LLM:      [magenta]{settings.LLM_PROVIDER} / {settings.LLM_MODEL}[/magenta]\n"
+            f"Coverage: [green]{coverage_threshold}%[/green]  "
+            f"Pass rate: [green]{pass_threshold}%[/green]",
             border_style="cyan",
         )
     )
@@ -105,93 +113,138 @@ def main(
     thread_id = "cli-run-001"
     config = {"configurable": {"thread_id": thread_id}}
 
-    current_state = None
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Starting pipeline...", total=None)
-
-        for event in pipeline.stream(initial_state, config=config, stream_mode="values"):
-            current_state = event
-            stage = event.get("stage", "")
-            progress.update(task, description=f"Stage: [bold]{stage}[/bold]")
+    current_state = _run_pipeline_stream(pipeline, initial_state, config)
 
     if current_state is None:
         console.print("[red]Pipeline produced no output.[/red]")
         raise typer.Exit(1)
 
-    stage = current_state.get("stage", "")
-
-    # Handle human-in-the-loop pause(s)
-    while "human_review_pending" in stage:
+    # ── Human-in-the-loop loop ─────────────────────────────────────────────
+    # LangGraph interrupts BEFORE human_loop node, so the last stage is the
+    # failure stage (e.g. "compilation_failed"), not "human_review_pending".
+    # We detect this by checking the graph's next pending tasks.
+    while _is_interrupted(pipeline, config, current_state):
         _handle_human_review(pipeline, config, current_state, console)
+        current_state = _run_pipeline_stream(pipeline, None, config)
+        if current_state is None:
+            break
 
-        # Resume after human fix
-        for event in pipeline.stream(None, config=config, stream_mode="values"):
-            current_state = event
-            stage = event.get("stage", "")
-            console.print(f"  → Stage: [bold]{stage}[/bold]")
-
-        stage = current_state.get("stage", "")
-
-    # Output
+    # ── Output ─────────────────────────────────────────────────────────────
     if output_json:
-        print(json.dumps(current_state.get("final_report", current_state), indent=2))
+        report = current_state.get("final_report") or current_state
+        print(json.dumps(report, indent=2, default=str))
     else:
-        _print_final_report(current_state, console)
+        _print_report(current_state, console)
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Pipeline streaming helper
+# ---------------------------------------------------------------------------
+
+def _run_pipeline_stream(pipeline, initial_state, config: dict) -> dict | None:
+    """Stream the pipeline and return the last state, showing stage progress."""
+    current_state = None
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Running...", total=None)
+        for event in pipeline.stream(initial_state, config=config, stream_mode="values"):
+            current_state = event
+            stage = event.get("stage", "")
+            progress.update(task, description=f"Stage: [bold]{stage}[/bold]")
+    return current_state
+
+
+def _is_interrupted(pipeline, config: dict, state: dict) -> bool:
+    """
+    Check whether the graph is paused at the human_loop interrupt point.
+    LangGraph sets next tasks to ['human_loop'] when interrupted before it.
+    """
+    stage = state.get("stage", "")
+    # Check via graph state snapshot
+    try:
+        snapshot = pipeline.get_state(config)
+        return "human_loop" in (snapshot.next or [])
+    except Exception:
+        # Fallback: check stage name
+        return stage in _HUMAN_LOOP_STAGES
+
+
+# ---------------------------------------------------------------------------
+# Human-in-the-loop handler
 # ---------------------------------------------------------------------------
 
 def _handle_human_review(pipeline, config: dict, state: dict, console: Console) -> None:
-    """Interactive human-in-the-loop prompt."""
-    reason = state.get("human_loop_reason", "Manual review required")
+    """Show the human review panel and inject the decision back into the graph."""
     stage = state.get("stage", "")
+    reason = state.get("human_loop_reason", "Manual intervention required.")
 
     console.print()
-    console.print(
-        Panel(
-            f"[bold yellow]⚠ Human Review Required[/bold yellow]\n\n"
-            f"[red]{reason}[/red]\n\n"
-            f"Stage: {stage}",
-            border_style="yellow",
-            title="Human-in-the-Loop",
-        )
-    )
+    console.print(Rule("[bold yellow]⚠ Human Review Required[/bold yellow]", style="yellow"))
+    console.print()
 
-    # Show relevant context
+    # Show reason
+    console.print(Panel(f"[red]{reason}[/red]", title="Reason", border_style="yellow"))
+
+    # Show stage-specific details
     if "compilation" in stage:
         errors = state.get("compilation_remaining_errors", [])
+        report = state.get("compilation_report", [])
+        fixed = state.get("compilation_fixed_count", 0)
+        unfixed = state.get("compilation_unfixed_count", 0)
+
+        console.print(f"\n[bold]Compilation Summary:[/bold] {fixed} fixed, {unfixed} unfixed\n")
+
         if errors:
-            console.print("[bold]Remaining compilation errors:[/bold]")
-            for e in errors[:10]:
-                console.print(f"  [red]•[/red] {e.get('line', e)}")
+            console.print("[bold red]Remaining errors:[/bold red]")
+            for e in errors[:15]:
+                console.print(f"  [red]•[/red] {e.get('line', str(e))}")
+        elif report:
+            console.print("[bold]Fix attempts:[/bold]")
+            for r in report[:10]:
+                status = "[green]✓[/green]" if r.get("fixed") else "[red]✗[/red]"
+                console.print(f"  {status} {r.get('file', 'unknown')}: {r.get('reason', '')}")
 
     elif "coverage" in stage:
         cov = state.get("coverage_data", {})
+        iters = state.get("coverage_iterations", 0)
         console.print(
-            f"[bold]Coverage:[/bold] {cov.get('coverage_percentage', 0):.1f}% "
-            f"(target: {state.get('coverage_threshold', 80)}%)"
+            f"\n[bold]Coverage:[/bold] {cov.get('coverage_percentage', 0):.1f}% "
+            f"(target: {state.get('coverage_threshold', 80)}%, after {iters} iterations)\n"
         )
+        low = cov.get("low_coverage_classes", [])
+        if low:
+            console.print("[bold]Lowest coverage classes:[/bold]")
+            for c in low[:10]:
+                console.print(f"  [red]•[/red] {c['class']}: {c['coverage_pct']}%")
 
     elif "tests" in stage:
         report = state.get("execution_report", {}).get("surefire", {})
+        iters = state.get("test_pass_iterations", 0)
         console.print(
-            f"[bold]Test Results:[/bold] "
+            f"\n[bold]Test Results:[/bold] "
             f"{report.get('passed', 0)}/{report.get('total', 0)} passed "
-            f"({report.get('pass_rate', 0):.1f}%)"
+            f"({report.get('pass_rate', 0):.1f}%, after {iters} iterations)\n"
         )
+        failed = report.get("failed_tests", [])
+        if failed:
+            console.print("[bold]Failing tests:[/bold]")
+            for t in failed[:10]:
+                console.print(f"  [red]•[/red] {t.get('classname')}.{t.get('name')}")
+                if t.get("message"):
+                    console.print(f"    [dim]{t['message'][:120]}[/dim]")
 
     console.print()
-    approved = typer.confirm("Have you applied the manual fixes? Continue pipeline?", default=True)
+    approved = typer.confirm(
+        "Apply fixes manually, then confirm to continue. Continue pipeline?",
+        default=True,
+    )
     feedback = ""
     if approved:
-        feedback = typer.prompt("Optional feedback/notes", default="", show_default=False)
+        feedback = typer.prompt("Optional notes (press Enter to skip)", default="", show_default=False)
 
     pipeline.update_state(
         config,
@@ -203,75 +256,126 @@ def _handle_human_review(pipeline, config: dict, state: dict, console: Console) 
     )
 
     if not approved:
-        console.print("[yellow]Pipeline aborted by user.[/yellow]")
+        console.print("[yellow]Pipeline aborted.[/yellow]")
         raise typer.Exit(0)
 
 
-def _print_final_report(state: dict, console: Console) -> None:
-    """Pretty-print the final pipeline report."""
-    report = state.get("final_report", {})
-    if not report:
-        console.print("[yellow]No final report available.[/yellow]")
+# ---------------------------------------------------------------------------
+# Report printer
+# ---------------------------------------------------------------------------
+
+def _print_report(state: dict, console: Console) -> None:
+    """Print either the final success report or a mid-pipeline failure summary."""
+    stage = state.get("stage", "")
+    report = state.get("final_report")
+
+    # ── Success path ───────────────────────────────────────────────────────
+    if report and stage == "done":
+        console.print()
+        console.print(Panel.fit("[bold green]✓ Pipeline Complete[/bold green]", border_style="green"))
+
+        table = Table(title="Pipeline Summary", show_header=True, header_style="bold cyan")
+        table.add_column("Stage", style="bold")
+        table.add_column("Result", justify="center")
+        table.add_column("Details")
+
+        gen_files = report.get("generated_test_files", [])
+        table.add_row("Test Generation", "[green]✓[/green]", f"{len(gen_files)} test files generated")
+
+        val = report.get("validation", {})
+        table.add_row("Validation", "[green]✓[/green]",
+                      f"{val.get('fixed', 0)} auto-fixed, {val.get('invalid', 0)} invalid")
+
+        comp = report.get("compilation", {})
+        table.add_row(
+            "Compilation",
+            "[green]✓[/green]" if comp.get("success") else "[red]✗[/red]",
+            f"{comp.get('fixed', 0)} errors fixed, {comp.get('unfixed', 0)} unfixed",
+        )
+
+        cov = report.get("coverage", {})
+        table.add_row(
+            "Code Coverage",
+            "[green]✓[/green]" if cov.get("met") else "[red]✗[/red]",
+            f"{cov.get('percentage', 0):.1f}% (target {cov.get('threshold', 80)}%, "
+            f"{cov.get('iterations', 0)} iteration(s))",
+        )
+
+        ex = report.get("test_execution", {})
+        table.add_row(
+            "Test Execution",
+            "[green]✓[/green]" if ex.get("met") else "[red]✗[/red]",
+            f"{ex.get('passed', 0)}/{ex.get('total', 0)} passed "
+            f"({ex.get('pass_rate', 0):.1f}%, target {ex.get('threshold', 80)}%, "
+            f"{ex.get('iterations', 0)} iteration(s))",
+        )
+
+        console.print(table)
+
+        if gen_files:
+            console.print()
+            console.print("[bold]Generated Test Files:[/bold]")
+            for f in gen_files:
+                console.print(f"  [green]•[/green] {f}")
         return
 
+    # ── Failure / mid-pipeline path ────────────────────────────────────────
     console.print()
-    console.print(Panel.fit("[bold green]✓ Pipeline Complete[/bold green]", border_style="green"))
+    console.print(Panel.fit(
+        f"[bold red]Pipeline stopped at stage: {stage}[/bold red]",
+        border_style="red",
+    ))
 
-    table = Table(title="Pipeline Summary", show_header=True, header_style="bold cyan")
+    # Show what did complete
+    table = Table(title="Progress Summary", show_header=True, header_style="bold cyan")
     table.add_column("Stage", style="bold")
-    table.add_column("Result")
+    table.add_column("Result", justify="center")
     table.add_column("Details")
 
-    gen_files = report.get("generated_test_files", [])
-    table.add_row(
-        "Test Generation",
-        "[green]✓[/green]",
-        f"{len(gen_files)} test files generated",
-    )
+    gen_files = state.get("generated_test_files", [])
+    if gen_files:
+        table.add_row("Test Generation", "[green]✓[/green]", f"{len(gen_files)} files")
 
-    val = report.get("validation", {})
-    table.add_row(
-        "Validation",
-        "[green]✓[/green]",
-        f"{val.get('fixed', 0)} auto-fixed, {val.get('invalid', 0)} invalid",
-    )
+    if state.get("validation_results") is not None:
+        table.add_row("Validation", "[green]✓[/green]",
+                      f"{state.get('validation_fixed_count', 0)} fixed")
 
-    comp = report.get("compilation", {})
-    comp_status = "[green]✓[/green]" if comp.get("success") else "[red]✗[/red]"
-    table.add_row(
-        "Compilation",
-        comp_status,
-        f"{comp.get('fixed', 0)} errors fixed, {comp.get('unfixed', 0)} unfixed",
-    )
+    if "compilation" in stage or state.get("compilation_report"):
+        fixed = state.get("compilation_fixed_count", 0)
+        unfixed = state.get("compilation_unfixed_count", 0)
+        table.add_row(
+            "Compilation",
+            "[red]✗[/red]",
+            f"{fixed} fixed, [red]{unfixed} unfixed[/red]",
+        )
 
-    cov = report.get("coverage", {})
-    cov_pct = cov.get("percentage", 0.0)
-    cov_status = "[green]✓[/green]" if cov.get("met") else "[red]✗[/red]"
-    table.add_row(
-        "Code Coverage",
-        cov_status,
-        f"{cov_pct:.1f}% (target: {cov.get('threshold', 80)}%, "
-        f"{cov.get('iterations', 0)} iteration(s))",
-    )
-
-    exec_data = report.get("test_execution", {})
-    pass_rate = exec_data.get("pass_rate", 0.0)
-    exec_status = "[green]✓[/green]" if exec_data.get("met") else "[red]✗[/red]"
-    table.add_row(
-        "Test Execution",
-        exec_status,
-        f"{exec_data.get('passed', 0)}/{exec_data.get('total', 0)} passed "
-        f"({pass_rate:.1f}%, target: {exec_data.get('threshold', 80)}%, "
-        f"{exec_data.get('iterations', 0)} iteration(s))",
-    )
+        # Show the actual errors
+        errors = state.get("compilation_remaining_errors", [])
+        if errors:
+            console.print(table)
+            console.print()
+            console.print("[bold red]Compilation errors that need manual fixing:[/bold red]")
+            for e in errors[:20]:
+                console.print(f"  [red]•[/red] {e.get('line', str(e))}")
+            console.print()
+            console.print(
+                "[dim]Fix the errors above in your project, then re-run the pipeline.[/dim]"
+            )
+            return
 
     console.print(table)
 
-    if gen_files:
-        console.print()
-        console.print("[bold]Generated Test Files:[/bold]")
-        for f in gen_files:
-            console.print(f"  [green]•[/green] {f}")
+    # Show error field if set
+    if state.get("error"):
+        console.print(f"\n[red]Error:[/red] {state['error']}")
+
+    # Show LLM 403 hint
+    if settings.LLM_PROVIDER == "grok":
+        console.print(
+            "\n[yellow]Tip:[/yellow] If you saw 403 errors above, your "
+            "[cyan]GROK_API_KEY[/cyan] in [cyan].env[/cyan] may be invalid.\n"
+            "Get a key at [link]https://console.x.ai[/link]"
+        )
 
 
 if __name__ == "__main__":
