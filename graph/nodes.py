@@ -61,7 +61,7 @@ def _make_llm():
         model=settings.LLM_MODEL,
         temperature=settings.LLM_TEMPERATURE,
         base_url=settings.OLLAMA_BASE_URL,
-        api_key=settings.GROK_API_KEY,
+        api_key=settings.OPENROUTER_API_KEY or settings.GROK_API_KEY,
     )
 
 
@@ -72,7 +72,7 @@ def _make_llm_text():
         model=settings.LLM_MODEL,
         temperature=settings.LLM_TEMPERATURE,
         base_url=settings.OLLAMA_BASE_URL,
-        api_key=settings.GROK_API_KEY,
+        api_key=settings.OPENROUTER_API_KEY or settings.GROK_API_KEY,
     )
 
 

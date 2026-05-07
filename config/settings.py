@@ -9,9 +9,12 @@ load_dotenv()
 
 class Settings:
     # LLM Configuration
-    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "grok")      # grok | ollama | openai | anthropic
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "grok-3-mini")
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openrouter")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+
+    # OpenRouter — https://openrouter.ai/keys (free tier available)
+    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 
     # Grok (xAI) — https://console.x.ai
     GROK_API_KEY: str = os.getenv("GROK_API_KEY", "")

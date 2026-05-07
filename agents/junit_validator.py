@@ -42,6 +42,13 @@ class JUnitValidatorAgent(BaseAgent):
                     Path(test_file_path).write_text(result["fixed_code"], encoding="utf-8")
                     fixed_count += 1
                     result["auto_fixed"] = True
+                elif result.get("regenerate"):
+                    # File is completely wrong (e.g. XML in a .java file) — delete and
+                    # let the generator re-create it on the next iteration
+                    Path(test_file_path).unlink(missing_ok=True)
+                    fixed_count += 1
+                    result["auto_fixed"] = True
+                    result["summary"] += " (file deleted for regeneration)"
                 else:
                     invalid_count += 1
                     result["auto_fixed"] = False
@@ -68,6 +75,24 @@ class JUnitValidatorAgent(BaseAgent):
             }
 
         test_code = test_data["content"]
+
+        # Detect completely non-Java content (e.g. XML, JSON, plain text)
+        # If the file doesn't look like Java at all, flag for regeneration
+        is_java = (
+            "package " in test_code
+            or "import " in test_code
+            or "class " in test_code
+            or "@Test" in test_code
+        )
+        if not is_java:
+            return {
+                "test_file": test_file_path,
+                "is_valid": False,
+                "issues": ["File does not contain valid Java code — likely LLM output error"],
+                "fixed_code": None,
+                "regenerate": True,
+                "summary": "File contains non-Java content and will be regenerated",
+            }
 
         # Find corresponding source file
         source_code = self._find_source_code(test_file_path, project_path)

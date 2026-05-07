@@ -5,6 +5,9 @@ and decides whether to loop back to the generator or proceed.
 """
 from __future__ import annotations
 
+import re
+import subprocess
+from pathlib import Path
 from typing import Any
 
 from agents.base import BaseAgent
@@ -16,39 +19,30 @@ class JacocoAgent(BaseAgent):
     """Generates and evaluates JaCoCo code coverage reports."""
 
     def run(self, state: dict[str, Any]) -> dict[str, Any]:
-        """
-        1. Run mvn jacoco:report
-        2. Parse coverage percentage
-        3. If >= threshold → proceed to test executor
-        4. If < threshold and iterations < max → loop back to generator
-        5. If < threshold and iterations >= max → human in the loop
-        """
         project_path: str = state["project_path"]
         maven_cmd: str = state.get("maven_cmd", "mvn")
         coverage_iterations: int = state.get("coverage_iterations", 0)
         coverage_threshold: float = state.get("coverage_threshold", settings.COVERAGE_THRESHOLD)
         max_iterations: int = state.get("max_coverage_iterations", settings.MAX_COVERAGE_ITERATIONS)
 
-        # Run jacoco report
-        coverage_result = self.invoke_tool(
-            "run_jacoco_report",
-            project_path=project_path,
-            maven_cmd=maven_cmd,
-        )
+        # Ensure JaCoCo is in pom.xml before running — fixes infinite loop
+        # caused by missing plugin returning 0% every iteration
+        self._ensure_jacoco_in_pom(project_path)
 
-        if not coverage_result.get("success"):
-            # Try running tests first then jacoco
-            coverage_result = self._run_tests_then_jacoco(project_path, maven_cmd)
+        # Run tests + jacoco report via mvn verify (most reliable)
+        coverage_result = self._run_verify(project_path, maven_cmd)
+
+        # Detect plugin-not-found error — treat as infrastructure failure
+        error_msg = coverage_result.get("error", "")
+        if "NoPluginFoundForPrefixException" in error_msg or "No plugin found for prefix 'jacoco'" in error_msg:
+            # pom.xml was just fixed — retry once
+            self._ensure_jacoco_in_pom(project_path)
+            coverage_result = self._run_verify(project_path, maven_cmd)
 
         coverage_pct = coverage_result.get("coverage_percentage", 0.0)
         coverage_iterations += 1
 
-        # LLM analysis for detailed insights
-        analysis = self._analyze_coverage(
-            project_path=project_path,
-            coverage_result=coverage_result,
-            coverage_threshold=coverage_threshold,
-        )
+        analysis = self._analyze_coverage(project_path, coverage_result, coverage_threshold)
 
         updated_coverage_data = {
             **coverage_result,
@@ -66,7 +60,6 @@ class JacocoAgent(BaseAgent):
                 "next": "test_executor",
             }
 
-        # Coverage below threshold
         if coverage_iterations >= max_iterations:
             return {
                 **state,
@@ -81,7 +74,6 @@ class JacocoAgent(BaseAgent):
                 ),
             }
 
-        # Loop back to generator with fine-tuned prompt
         return {
             **state,
             "coverage_data": updated_coverage_data,
@@ -92,14 +84,68 @@ class JacocoAgent(BaseAgent):
             "next": "junit_generator",
         }
 
-    def _run_tests_then_jacoco(self, project_path: str, maven_cmd: str) -> dict[str, Any]:
-        """Run mvn verify as fallback to generate jacoco data."""
+    # -------------------------------------------------------------------------
+
+    def _ensure_jacoco_in_pom(self, project_path: str) -> None:
+        """Add JaCoCo plugin to pom.xml if it's not already there."""
+        pom_path = Path(project_path) / "pom.xml"
+        if not pom_path.exists():
+            return
+
+        content = pom_path.read_text(encoding="utf-8")
+        if "jacoco-maven-plugin" in content:
+            return  # Already present
+
+        jacoco_plugin = """
+                        <plugin>
+                            <groupId>org.jacoco</groupId>
+                            <artifactId>jacoco-maven-plugin</artifactId>
+                            <version>0.8.11</version>
+                            <executions>
+                                <execution>
+                                    <goals><goal>prepare-agent</goal></goals>
+                                </execution>
+                                <execution>
+                                    <id>report</id>
+                                    <phase>test</phase>
+                                    <goals><goal>report</goal></goals>
+                                </execution>
+                            </executions>
+                        </plugin>"""
+
+        if "</plugins>" in content:
+            content = content.replace(
+                "</plugins>", jacoco_plugin + "\n                </plugins>", 1
+            )
+        elif "</build>" in content:
+            content = content.replace(
+                "</build>",
+                f"\n        <plugins>{jacoco_plugin}\n        </plugins>\n        </build>",
+                1,
+            )
+        else:
+            return  # Can't safely inject
+
+        pom_path.write_text(content, encoding="utf-8")
+
+    def _run_verify(self, project_path: str, maven_cmd: str) -> dict[str, Any]:
+        """Run mvn verify to compile, test, and generate JaCoCo report in one shot."""
         result = self.invoke_tool(
             "run_maven_verify",
             project_path=project_path,
             maven_cmd=maven_cmd,
         )
-        return result.get("coverage", {"success": False, "coverage_percentage": 0.0})
+        coverage = result.get("coverage", {})
+
+        # If jacoco.xml wasn't generated, try standalone jacoco:report
+        if not coverage.get("success"):
+            coverage = self.invoke_tool(
+                "run_jacoco_report",
+                project_path=project_path,
+                maven_cmd=maven_cmd,
+            )
+
+        return coverage if coverage else {"success": False, "coverage_percentage": 0.0}
 
     def _analyze_coverage(
         self,
@@ -107,13 +153,12 @@ class JacocoAgent(BaseAgent):
         coverage_result: dict,
         coverage_threshold: float,
     ) -> dict[str, Any]:
-        """Use LLM to analyze coverage gaps and provide recommendations."""
         coverage_pct = coverage_result.get("coverage_percentage", 0.0)
         low_coverage = coverage_result.get("low_coverage_classes", [])
 
         uncovered_details = "\n".join(
             f"  - {c['class']}: {c['coverage_pct']}% ({c['missed']} instructions missed)"
-            for c in low_coverage[:20]  # Limit to top 20
+            for c in low_coverage[:20]
         )
 
         user_prompt = JACOCO_ANALYSIS_PROMPT.format(
